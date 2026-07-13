@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
-import { supabase } from './lib/supabase';
+import { supabase, DEMO_MODE } from './lib/supabase';
+import { MOCK_PRICE_DATA, MOCK_SIGNALS, MOCK_EXECUTIONS, MOCK_SETTINGS } from './lib/mockData';
 import PriceChart from './components/PriceChart';
 import IndicatorPanel from './components/IndicatorPanel';
 import SignalCard from './components/SignalCard';
@@ -14,22 +15,26 @@ export default function App() {
   const [settings, setSettings] = useState(null);
 
   const loadSettings = useCallback(async () => {
+    if (DEMO_MODE) { setSettings(MOCK_SETTINGS); return; }
     const { data } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
     setSettings(data);
   }, []);
 
   const toggleAutoMode = async () => {
     const next = !settings.auto_mode_enabled;
+    if (DEMO_MODE) { setSettings((s) => ({ ...s, auto_mode_enabled: next })); return; }
     await supabase.from('bot_settings').update({ auto_mode_enabled: next }).eq('id', 1);
     setSettings((s) => ({ ...s, auto_mode_enabled: next }));
   };
 
   const updateThreshold = async (value) => {
     setSettings((s) => ({ ...s, auto_mode_threshold: value }));
+    if (DEMO_MODE) return;
     await supabase.from('bot_settings').update({ auto_mode_threshold: value }).eq('id', 1);
   };
 
   const loadPrices = useCallback(async () => {
+    if (DEMO_MODE) { setPriceData(MOCK_PRICE_DATA); return; }
     for (const exchange of EXCHANGES) {
       const { data } = await supabase
         .from('price_history')
@@ -42,6 +47,7 @@ export default function App() {
   }, []);
 
   const loadSignals = useCallback(async () => {
+    if (DEMO_MODE) { setSignals(MOCK_SIGNALS); return; }
     const { data } = await supabase
       .from('signals')
       .select('*')
@@ -51,6 +57,7 @@ export default function App() {
   }, []);
 
   const loadExecutions = useCallback(async () => {
+    if (DEMO_MODE) { setExecutions(MOCK_EXECUTIONS); return; }
     const { data } = await supabase
       .from('executions')
       .select('*')
@@ -64,6 +71,8 @@ export default function App() {
     loadSignals();
     loadExecutions();
     loadSettings();
+
+    if (DEMO_MODE) return; // pas de polling ni de realtime en démo, données statiques
 
     // Rafraîchissement automatique toutes les 60s
     const interval = setInterval(() => {
@@ -86,6 +95,12 @@ export default function App() {
   }, [loadPrices, loadSignals, loadExecutions, loadSettings]);
 
   const handleValidate = async (signal) => {
+    if (DEMO_MODE) {
+      setToast({ type: 'success', message: `[Démo] Ordre ${signal.action} simulé sur ${signal.exchange} — aucune exécution réelle` });
+      setSignals((prev) => prev.filter((s) => s.id !== signal.id));
+      setTimeout(() => setToast(null), 5000);
+      return;
+    }
     const { data, error } = await supabase.functions.invoke('execute-order', {
       body: { signal_id: signal.id },
     });
@@ -100,6 +115,7 @@ export default function App() {
   };
 
   const handleReject = async (signal) => {
+    if (DEMO_MODE) { setSignals((prev) => prev.filter((s) => s.id !== signal.id)); return; }
     await supabase.from('signals').update({ status: 'rejected' }).eq('id', signal.id);
     loadSignals();
   };
@@ -111,6 +127,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 p-4 md:p-8 space-y-6">
+      {DEMO_MODE && (
+        <div className="rounded-md bg-sky-950 border border-sky-700 text-sky-400 text-sm px-3 py-2">
+          Mode démo — données fictives, aucune connexion Supabase, aucun ordre réel n'est exécuté.
+        </div>
+      )}
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold">BTC Trading — Semi-Auto</h1>
