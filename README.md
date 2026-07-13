@@ -105,6 +105,41 @@ toute tentative de validation d'un signal Coinbase renverra une erreur explicite
 
 ---
 
+---
+
+## Structures de trading ajoutées
+
+Le moteur de signal (`src/lib/indicators.js` + `generate-signal`) combine maintenant :
+
+| Indicateur | Rôle | Type de vote |
+|---|---|---|
+| SMA20/50 | Tendance (golden/death cross) | Directionnel |
+| RSI(14) | Momentum / survente-surachat | Directionnel |
+| MACD | Momentum / croisement | Directionnel |
+| Bollinger Bands(20,2) | Extrême statistique | Directionnel |
+| Volume (vs moyenne 20 périodes) | Confirmation | Multiplie la confiance (×0.8 à ×1.1), ne vote pas seul |
+| ATR(14) | Volatilité | Sert à calculer stop-loss/take-profit, pas un vote |
+
+**⚠️ Stop-loss / take-profit affichés = indicatifs, pas placés sur l'exchange.**
+`execute-order` envoie un ordre MARKET simple. Les niveaux `stop_loss`/`take_profit`
+calculés via ATR (1.5x / 2.5x) sont stockés et affichés pour t'aider à décider, mais
+**aucun ordre stop n'est automatiquement posé chez Binance/Coinbase**. Si tu veux une
+vraie protection automatique, il faut ajouter un ordre OCO (`STOP_LOSS_LIMIT` +
+`TAKE_PROFIT_LIMIT` groupés) juste après le fill — je peux l'ajouter si tu veux, mais
+ça complexifie la gestion des annulations/timeouts.
+
+### Coupe-circuit (circuit breaker)
+
+`bot_settings.max_daily_loss_usd` (défaut 50 USD) : si le P&L réalisé cumulé des dernières
+24h descend sous `-max_daily_loss_usd`, `generate-signal` désactive automatiquement
+`auto_mode_enabled` et pose `circuit_breaker_triggered = true`. Le dashboard affiche
+un bandeau rouge. **Il faut le réactiver manuellement** (mettre `circuit_breaker_triggered`
+à `false` dans Supabase ou via le dashboard) — volontairement pas d'auto-réactivation.
+
+Le P&L réalisé est calculé en moyenne pondérée globale des achats (pas un vrai FIFO par
+lot) — suffisant pour un usage solo BTC-only, mais à savoir si tu compares à un outil
+de comptabilité fiscale plus tard.
+
 ## 4. Ce qui manque encore pour une vraie mise en prod
 
 - **Gestion du solde disponible** : le bot ne vérifie pas ton solde avant de proposer un ordre.

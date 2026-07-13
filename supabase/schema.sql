@@ -12,6 +12,8 @@ create table price_history (
   exchange text not null check (exchange in ('binance', 'coinbase')),
   symbol text not null default 'BTCUSDT',
   price numeric not null,
+  high numeric, -- plus haut 24h, requis pour le calcul de l'ATR
+  low numeric,  -- plus bas 24h, requis pour le calcul de l'ATR
   volume numeric,
   recorded_at timestamptz not null default now()
 );
@@ -27,6 +29,8 @@ create table signals (
   reasons jsonb not null default '[]',
   indicators jsonb not null default '{}',
   suggested_amount numeric, -- montant suggéré en USDT/EUR, calculé côté serveur
+  stop_loss numeric,   -- niveau de sortie perte, calculé via ATR (indicatif, non placé automatiquement sur l'exchange)
+  take_profit numeric, -- niveau de sortie gain, calculé via ATR (indicatif, non placé automatiquement sur l'exchange)
   status text not null default 'pending' check (status in ('pending', 'validated', 'rejected', 'expired')),
   created_at timestamptz not null default now(),
   expires_at timestamptz not null default (now() + interval '15 minutes')
@@ -40,8 +44,10 @@ create table executions (
   exchange text not null check (exchange in ('binance', 'coinbase')),
   symbol text not null default 'BTCUSDT',
   side text not null check (side in ('BUY', 'SELL')),
-  amount numeric not null,
-  price numeric,
+  amount numeric not null, -- montant en USD envoyé à l'exchange
+  price numeric,           -- prix d'exécution réel renvoyé par l'exchange
+  btc_amount numeric,      -- quantité BTC réellement achetée/vendue, renvoyée par l'exchange
+  realized_pnl_usd numeric, -- calculé uniquement sur les SELL (prix vente - coût moyen) * quantité ; null sur les BUY
   exchange_order_id text, -- id retourné par l'exchange
   status text not null default 'submitted' check (status in ('submitted', 'filled', 'failed', 'cancelled')),
   error_message text,
@@ -52,11 +58,18 @@ create index idx_executions_created on executions (created_at desc);
 
 -- Réglages du bot (ligne unique, id=1) — pilote le mode auto depuis le dashboard,
 -- sans avoir à redéployer les Edge Functions.
+-- Vue de suivi du P&L réalisé du jour — sert de base au coupe-circuit du mode auto.
+-- Le P&L est estimé simplement (somme signée des montants exécutés), une vraie
+-- comptabilité de position moyenne pondérée serait plus précise mais demande de
+-- suivre l'inventaire BTC détenu ; à améliorer si tu veux plus de rigueur.
 create table bot_settings (
   id int primary key default 1 check (id = 1),
   auto_mode_enabled boolean not null default false,
   auto_mode_threshold numeric not null default 0.8 check (auto_mode_threshold between 0 and 1),
   max_auto_trades_per_day int not null default 3,
+  max_daily_loss_usd numeric not null default 50, -- coupe-circuit : perte réalisée max/jour avant désactivation auto
+  circuit_breaker_triggered boolean not null default false,
+  circuit_breaker_triggered_at timestamptz,
   updated_at timestamptz not null default now()
 );
 insert into bot_settings (id) values (1);

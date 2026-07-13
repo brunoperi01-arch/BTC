@@ -15,12 +15,15 @@ Deno.serve(async (req) => {
 
     // --- Binance (public, pas de clé) ---
     try {
-      const binanceRes = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT');
-      const binanceData = await binanceRes.json();
+      const binanceRes = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
+      const d = await binanceRes.json();
       rows.push({
         exchange: 'binance',
         symbol: 'BTCUSDT',
-        price: parseFloat(binanceData.price),
+        price: parseFloat(d.lastPrice),
+        high: parseFloat(d.highPrice),
+        low: parseFloat(d.lowPrice),
+        volume: parseFloat(d.volume),
       });
     } catch (e) {
       console.error('Erreur Binance:', e);
@@ -28,12 +31,17 @@ Deno.serve(async (req) => {
 
     // --- Coinbase (public, pas de clé) ---
     try {
-      const coinbaseRes = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot');
-      const coinbaseData = await coinbaseRes.json();
+      const statsRes = await fetch('https://api.exchange.coinbase.com/products/BTC-USD/stats');
+      const stats = await statsRes.json();
+      const tickerRes = await fetch('https://api.exchange.coinbase.com/products/BTC-USD/ticker');
+      const ticker = await tickerRes.json();
       rows.push({
         exchange: 'coinbase',
         symbol: 'BTC-USD',
-        price: parseFloat(coinbaseData.data.amount),
+        price: parseFloat(ticker.price),
+        high: parseFloat(stats.high),
+        low: parseFloat(stats.low),
+        volume: parseFloat(stats.volume),
       });
     } catch (e) {
       console.error('Erreur Coinbase:', e);

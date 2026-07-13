@@ -86,8 +86,62 @@ export function macd(prices, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9)
   return { macdLine, signalLine, histogram };
 }
 
+/** Bollinger Bands : bande moyenne (SMA), bande haute/basse à N écarts-types */
+export function bollingerBands(prices, period = 20, stdDevMult = 2) {
+  const middle = sma(prices, period);
+  const upper = [];
+  const lower = [];
+  for (let i = 0; i < prices.length; i++) {
+    if (middle[i] === null) {
+      upper.push(null);
+      lower.push(null);
+      continue;
+    }
+    const slice = prices.slice(i - period + 1, i + 1);
+    const variance = slice.reduce((sum, p) => sum + (p - middle[i]) ** 2, 0) / period;
+    const stdDev = Math.sqrt(variance);
+    upper.push(middle[i] + stdDevMult * stdDev);
+    lower.push(middle[i] - stdDevMult * stdDev);
+  }
+  return { middle, upper, lower };
+}
+
 /**
- * Génère un signal composite à partir des 3 indicateurs.
+ * Average True Range — mesure de volatilité, sert à calibrer stop-loss/take-profit
+ * et la taille de position selon le risque réel du marché plutôt qu'un % fixe.
+ * highs/lows/closes doivent être alignés (même longueur, même index temporel).
+ */
+export function atr(highs, lows, closes, period = 14) {
+  const trueRanges = closes.map((close, i) => {
+    if (i === 0) return highs[i] - lows[i];
+    const highLow = highs[i] - lows[i];
+    const highPrevClose = Math.abs(highs[i] - closes[i - 1]);
+    const lowPrevClose = Math.abs(lows[i] - closes[i - 1]);
+    return Math.max(highLow, highPrevClose, lowPrevClose);
+  });
+  return ema(trueRanges, period);
+}
+
+/**
+ * Calcule des niveaux de stop-loss / take-profit basés sur l'ATR plutôt qu'un
+ * pourcentage fixe — la marge s'adapte à la volatilité réelle du moment.
+ * multiplier classique : 1.5-2x ATR pour le stop, 2.5-3x pour le take-profit (ratio R:R ~1.5).
+ */
+export function computeRiskLevels(price, atrValue, action, { stopMult = 1.5, targetMult = 2.5 } = {}) {
+  if (!atrValue) return { stopLoss: null, takeProfit: null };
+  if (action === 'BUY') {
+    return {
+      stopLoss: price - atrValue * stopMult,
+      takeProfit: price + atrValue * targetMult,
+    };
+  }
+  return {
+    stopLoss: price + atrValue * stopMult,
+    takeProfit: price - atrValue * targetMult,
+  };
+}
+
+
  * Renvoie { action: 'BUY'|'SELL'|'HOLD', confidence: 0-1, reasons: string[] }
  * Logique volontairement simple et transparente (pas de boîte noire) :
  * chaque indicateur vote, la confiance = proportion de votes concordants.
@@ -98,11 +152,16 @@ export function generateSignal(prices, {
   rsiPeriod = 14,
   rsiOverbought = 70,
   rsiOversold = 30,
+  volumes = null, // tableau optionnel, même longueur que prices
+  highs = null,   // requis pour l'ATR (sinon dérivé approximativement de prices)
+  lows = null,
 } = {}) {
   const smaShortArr = sma(prices, smaShort);
   const smaLongArr = sma(prices, smaLong);
   const rsiArr = rsi(prices, rsiPeriod);
   const { macdLine, signalLine, histogram } = macd(prices);
+  const bb = bollingerBands(prices, 20, 2);
+  const atrArr = highs && lows ? atr(highs, lows, prices, 14) : null;
 
   const i = prices.length - 1;
   const reasons = [];
@@ -145,6 +204,27 @@ export function generateSignal(prices, {
     }
   }
 
+  // Vote 4 : Bollinger Bands — prix hors des bandes = extrême statistique
+  if (bb.upper[i] !== null && bb.lower[i] !== null) {
+    if (prices[i] <= bb.lower[i]) {
+      votes.push('BUY');
+      reasons.push('Prix sous la bande de Bollinger basse (extrême statistique)');
+    } else if (prices[i] >= bb.upper[i]) {
+      votes.push('SELL');
+      reasons.push('Prix au-dessus de la bande de Bollinger haute (extrême statistique)');
+    }
+  }
+
+  // Vote 5 (confirmation, pas un vote directionnel) : volume — un mouvement sur
+  // faible volume est moins fiable. On ne vote pas BUY/SELL mais on ajuste la confiance.
+  let volumeConfirms = null;
+  if (volumes && volumes.length === prices.length) {
+    const avgVolume = volumes.slice(Math.max(0, i - 20), i).reduce((a, b) => a + b, 0) / Math.min(20, i);
+    volumeConfirms = volumes[i] > avgVolume * 1.2;
+    if (volumeConfirms) reasons.push('Volume supérieur à la moyenne (mouvement confirmé)');
+    else reasons.push('Volume faible (signal moins fiable, à prendre avec prudence)');
+  }
+
   const buyVotes = votes.filter((v) => v === 'BUY').length;
   const sellVotes = votes.filter((v) => v === 'SELL').length;
   const total = votes.length || 1;
@@ -159,6 +239,12 @@ export function generateSignal(prices, {
     confidence = sellVotes / total;
   }
 
+  // Le volume ne crée pas de signal seul, mais pénalise/renforce la confiance d'un signal existant
+  if (volumeConfirms === false && action !== 'HOLD') confidence *= 0.8;
+  if (volumeConfirms === true && action !== 'HOLD') confidence = Math.min(1, confidence * 1.1);
+
+  const riskLevels = atrArr ? computeRiskLevels(prices[i], atrArr[i], action) : { stopLoss: null, takeProfit: null };
+
   return {
     action,
     confidence,
@@ -171,6 +257,11 @@ export function generateSignal(prices, {
       macd: macdLine[i],
       macdSignal: signalLine[i],
       macdHistogram: histogram[i],
+      bollingerUpper: bb.upper[i],
+      bollingerLower: bb.lower[i],
+      atr: atrArr ? atrArr[i] : null,
+      volumeConfirms,
     },
+    riskLevels,
   };
 }

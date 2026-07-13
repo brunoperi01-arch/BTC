@@ -142,6 +142,13 @@ export default function App() {
         </div>
       </header>
 
+      {settings?.circuit_breaker_triggered && (
+        <div className="rounded-md bg-red-950 border border-red-700 text-red-400 text-sm px-3 py-2">
+          Coupe-circuit déclenché — perte journalière au-delà du seuil, mode auto désactivé automatiquement.
+          Réactive-le manuellement dans bot_settings une fois la situation vérifiée.
+        </div>
+      )}
+
       {settings && (
         <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 flex items-center justify-between flex-wrap gap-3">
           <div className="flex items-center gap-3">

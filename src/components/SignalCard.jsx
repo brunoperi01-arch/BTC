@@ -52,6 +52,17 @@ export default function SignalCard({ signal, onValidate, onReject }) {
         ))}
       </ul>
 
+      {(signal.stop_loss || signal.take_profit) && (
+        <div className="flex gap-4 text-xs pt-1 border-t border-neutral-800 pt-2">
+          {signal.stop_loss && (
+            <span className="text-red-400">Stop-loss ~${Math.round(signal.stop_loss).toLocaleString('fr-FR')}</span>
+          )}
+          {signal.take_profit && (
+            <span className="text-emerald-400">Take-profit ~${Math.round(signal.take_profit).toLocaleString('fr-FR')}</span>
+          )}
+        </div>
+      )}
+
       <div className="flex gap-2 pt-1">
         <button
           onClick={handleValidate}

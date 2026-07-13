@@ -68,11 +68,45 @@ function macd(prices: number[]) {
   return { macdLine, signalLine, histogram };
 }
 
-function buildSignal(prices: number[]) {
+function bollingerBands(prices: number[], period = 20, mult = 2) {
+  const middle = sma(prices, period);
+  const upper: (number | null)[] = [];
+  const lower: (number | null)[] = [];
+  for (let i = 0; i < prices.length; i++) {
+    if (middle[i] === null) { upper.push(null); lower.push(null); continue; }
+    const slice = prices.slice(i - period + 1, i + 1);
+    const variance = slice.reduce((sum, p) => sum + (p - middle[i]!) ** 2, 0) / period;
+    const stdDev = Math.sqrt(variance);
+    upper.push(middle[i]! + mult * stdDev);
+    lower.push(middle[i]! - mult * stdDev);
+  }
+  return { middle, upper, lower };
+}
+
+function atr(highs: number[], lows: number[], closes: number[], period = 14): (number | null)[] {
+  const trueRanges = closes.map((close, i) => {
+    if (i === 0) return highs[i] - lows[i];
+    return Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1]));
+  });
+  return ema(trueRanges, period);
+}
+
+function computeRiskLevels(price: number, atrValue: number | null, action: string, stopMult = 1.5, targetMult = 2.5) {
+  if (!atrValue) return { stopLoss: null, takeProfit: null };
+  if (action === 'BUY') {
+    return { stopLoss: price - atrValue * stopMult, takeProfit: price + atrValue * targetMult };
+  }
+  return { stopLoss: price + atrValue * stopMult, takeProfit: price - atrValue * targetMult };
+}
+
+
+function buildSignal(prices: number[], highs: number[], lows: number[], volumes: number[]) {
   const smaShort = sma(prices, 20);
   const smaLong = sma(prices, 50);
   const rsiArr = rsi(prices, 14);
   const { macdLine, signalLine, histogram } = macd(prices);
+  const bb = bollingerBands(prices, 20, 2);
+  const atrArr = atr(highs, lows, prices, 14);
   const i = prices.length - 1;
   const reasons: string[] = [];
   const votes: string[] = [];
@@ -91,6 +125,18 @@ function buildSignal(prices: number[]) {
     else if (macdLine[i]! < signalLine[i]! && histogram[i]! < 0) { votes.push('SELL'); reasons.push('MACD < signal'); }
     else votes.push('HOLD');
   }
+  if (bb.upper[i] !== null && bb.lower[i] !== null) {
+    if (prices[i] <= bb.lower[i]!) { votes.push('BUY'); reasons.push('Prix sous la bande de Bollinger basse'); }
+    else if (prices[i] >= bb.upper[i]!) { votes.push('SELL'); reasons.push('Prix au-dessus de la bande de Bollinger haute'); }
+  }
+
+  let volumeConfirms: boolean | null = null;
+  if (volumes.length === prices.length && i >= 1) {
+    const window = volumes.slice(Math.max(0, i - 20), i);
+    const avgVolume = window.reduce((a, b) => a + b, 0) / (window.length || 1);
+    volumeConfirms = volumes[i] > avgVolume * 1.2;
+    reasons.push(volumeConfirms ? 'Volume supérieur à la moyenne (mouvement confirmé)' : 'Volume faible (signal moins fiable)');
+  }
 
   const buyVotes = votes.filter((v) => v === 'BUY').length;
   const sellVotes = votes.filter((v) => v === 'SELL').length;
@@ -99,6 +145,11 @@ function buildSignal(prices: number[]) {
   let confidence = 0;
   if (buyVotes > sellVotes) { action = 'BUY'; confidence = buyVotes / total; }
   else if (sellVotes > buyVotes) { action = 'SELL'; confidence = sellVotes / total; }
+
+  if (volumeConfirms === false && action !== 'HOLD') confidence *= 0.8;
+  if (volumeConfirms === true && action !== 'HOLD') confidence = Math.min(1, confidence * 1.1);
+
+  const riskLevels = computeRiskLevels(prices[i], atrArr[i], action);
 
   return {
     action,
@@ -112,7 +163,12 @@ function buildSignal(prices: number[]) {
       macd: macdLine[i],
       macdSignal: signalLine[i],
       macdHistogram: histogram[i],
+      bollingerUpper: bb.upper[i],
+      bollingerLower: bb.lower[i],
+      atr: atrArr[i],
+      volumeConfirms,
     },
+    riskLevels,
   };
 }
 
@@ -127,7 +183,26 @@ async function maybeAutoExecute(
     .single();
 
   if (!settings || !settings.auto_mode_enabled) return { autoExecuted: false };
+  if (settings.circuit_breaker_triggered) return { autoExecuted: false, reason: 'circuit_breaker_active' };
   if (signal.confidence < settings.auto_mode_threshold) return { autoExecuted: false };
+
+  // Coupe-circuit : si la perte réalisée du jour dépasse le seuil, on désactive le
+  // mode auto et on bloque toute nouvelle exécution automatique jusqu'à réactivation manuelle.
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data: todayExecutions } = await supabase
+    .from('executions')
+    .select('realized_pnl_usd')
+    .gte('created_at', since)
+    .not('realized_pnl_usd', 'is', null);
+
+  const dailyPnl = (todayExecutions ?? []).reduce((sum: number, e: { realized_pnl_usd: number }) => sum + e.realized_pnl_usd, 0);
+  if (dailyPnl <= -settings.max_daily_loss_usd) {
+    await supabase
+      .from('bot_settings')
+      .update({ circuit_breaker_triggered: true, circuit_breaker_triggered_at: new Date().toISOString(), auto_mode_enabled: false })
+      .eq('id', 1);
+    return { autoExecuted: false, reason: 'circuit_breaker_triggered_now' };
+  }
 
   // Plafond quotidien : compte les exécutions auto des dernières 24h
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -162,7 +237,7 @@ Deno.serve(async (req) => {
     for (const exchange of ['binance', 'coinbase']) {
       const { data, error } = await supabase
         .from('price_history')
-        .select('price, recorded_at')
+        .select('price, high, low, volume, recorded_at')
         .eq('exchange', exchange)
         .order('recorded_at', { ascending: true })
         .limit(200);
@@ -173,7 +248,10 @@ Deno.serve(async (req) => {
       }
 
       const prices = data.map((d: { price: number }) => d.price);
-      const signal = buildSignal(prices);
+      const highs = data.map((d: { high: number | null }) => d.high ?? d.price ?? 0);
+      const lows = data.map((d: { low: number | null }) => d.low ?? d.price ?? 0);
+      const volumes = data.map((d: { volume: number | null }) => d.volume ?? 0);
+      const signal = buildSignal(prices, highs, lows, volumes);
 
       // Ne crée un signal en base que si action != HOLD (évite le bruit)
       if (signal.action === 'HOLD') {
@@ -193,6 +271,8 @@ Deno.serve(async (req) => {
           reasons: signal.reasons,
           indicators: signal.indicators,
           suggested_amount: suggestedAmount,
+          stop_loss: signal.riskLevels.stopLoss,
+          take_profit: signal.riskLevels.takeProfit,
         })
         .select()
         .single();

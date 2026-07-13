@@ -69,6 +69,33 @@ async function executeCoinbaseOrder(side: 'BUY' | 'SELL', productId: string, usd
   );
 }
 
+async function computeRealizedPnl(
+  supabase: ReturnType<typeof createClient>,
+  exchange: string,
+  side: 'BUY' | 'SELL',
+  btcAmount: number,
+  execPrice: number,
+): Promise<number | null> {
+  if (side === 'BUY') return null; // le P&L ne se réalise qu'à la vente
+
+  // Coût moyen pondéré des achats passés (FIFO simplifié en moyenne pondérée globale)
+  const { data: buys } = await supabase
+    .from('executions')
+    .select('btc_amount, price')
+    .eq('exchange', exchange)
+    .eq('side', 'BUY')
+    .eq('status', 'filled')
+    .not('btc_amount', 'is', null);
+
+  if (!buys || buys.length === 0) return null; // pas d'historique d'achat, impossible de calculer un coût de revient
+
+  const totalBtc = buys.reduce((sum: number, b: { btc_amount: number }) => sum + b.btc_amount, 0);
+  const totalCost = buys.reduce((sum: number, b: { btc_amount: number; price: number }) => sum + b.btc_amount * b.price, 0);
+  const avgCostBasis = totalBtc > 0 ? totalCost / totalBtc : execPrice;
+
+  return Math.round((execPrice - avgCostBasis) * btcAmount * 100) / 100;
+}
+
 Deno.serve(async (req) => {
   try {
     const { signal_id, auto = false } = await req.json();
@@ -99,11 +126,16 @@ Deno.serve(async (req) => {
     let orderId: string | null = null;
     let execStatus: 'filled' | 'failed' = 'filled';
     let errorMessage: string | null = null;
+    let execPrice: number | null = null;
+    let btcAmount: number | null = null;
 
     try {
       if (signal.exchange === 'binance') {
         executionResult = await executeBinanceOrder(signal.action, signal.symbol, signal.suggested_amount);
         orderId = String(executionResult.orderId);
+        btcAmount = parseFloat(executionResult.executedQty);
+        const quoteQty = parseFloat(executionResult.cummulativeQuoteQty ?? '0');
+        execPrice = btcAmount > 0 ? quoteQty / btcAmount : null;
       } else {
         executionResult = await executeCoinbaseOrder(signal.action, signal.symbol, signal.suggested_amount);
         orderId = executionResult.order_id;
@@ -113,6 +145,10 @@ Deno.serve(async (req) => {
       errorMessage = String(execErr);
     }
 
+    const realizedPnl = execStatus === 'filled' && btcAmount && execPrice
+      ? await computeRealizedPnl(supabase, signal.exchange, signal.action, btcAmount, execPrice)
+      : null;
+
     const { data: execution, error: insertError } = await supabase
       .from('executions')
       .insert({
@@ -121,6 +157,9 @@ Deno.serve(async (req) => {
         symbol: signal.symbol,
         side: signal.action,
         amount: signal.suggested_amount,
+        price: execPrice,
+        btc_amount: btcAmount,
+        realized_pnl_usd: realizedPnl,
         exchange_order_id: orderId,
         status: execStatus,
         error_message: errorMessage,
